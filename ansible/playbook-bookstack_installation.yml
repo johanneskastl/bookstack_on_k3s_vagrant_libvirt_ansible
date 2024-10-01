@@ -1,0 +1,72 @@
+---
+
+- name: 'Install Bookstack'
+  hosts: 'k3s1'
+  gather_facts: true
+  become: false
+  module_defaults:
+    kubernetes.core.helm:
+      kubeconfig: './k3s-kubeconfig'
+    kubernetes.core.k8s:
+      kubeconfig: './k3s-kubeconfig'
+    kubernetes.core.k8s_info:
+      kubeconfig: './k3s-kubeconfig'
+
+  tasks:
+
+    - name: 'Create the bookstack namespace'
+      delegate_to: 'localhost'
+      kubernetes.core.k8s:
+        name: 'bookstack'
+        api_version: 'v1'
+        kind: 'Namespace'
+        state: 'present'
+
+    - name: 'Install bookstack via the helm chart'
+      delegate_to: 'localhost'
+      kubernetes.core.helm:
+        chart_ref: 'oci://ghcr.io/gabe565/charts/bookstack'
+        release_name: 'bookstack'
+        release_namespace: 'bookstack'
+        release_values:
+          ingress:
+            main:
+              enabled: true
+              hosts:
+                - host: "bookstack.{{ hostvars['k3s1']['ansible_default_ipv4']['address'] }}.sslip.io"
+                  paths:
+                    - path: "/"
+          persistence:
+            config:
+              enabled: true
+          mariadb:
+            enabled: true
+
+    - name: 'Wait until all pods are running'
+      delegate_to: 'localhost'
+      kubernetes.core.k8s_info:
+        api_version: v1
+        kind: Pod
+        namespace: bookstack
+      register: pod_list
+      until: |
+        pod_list | json_query("resources[*].status.phase") | unique | sort == ["Running"]
+        or
+        pod_list | json_query("resources[*].status.phase") | unique | sort == ["Running", "Succeeded"]
+      retries: 36
+      delay: 10
+
+    - name: 'Wait for the bookstack URL to be available'
+      delegate_to: 'localhost'
+      ansible.builtin.uri:
+        url: "http://bookstack.{{ hostvars['k3s1']['ansible_default_ipv4']['address'] }}.sslip.io"
+        validate_certs: false
+      register: result
+      until: "result.status == 200"
+      retries: 31
+      delay: 10
+
+    - name: 'Output bookstack URL'
+      delegate_to: 'localhost'
+      ansible.builtin.debug:
+        msg: "The bookstack UI is reachable at http://bookstack.{{ hostvars['k3s1']['ansible_default_ipv4']['address'] }}.sslip.io"
